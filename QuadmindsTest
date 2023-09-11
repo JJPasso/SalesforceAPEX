@@ -1,0 +1,110 @@
+@isTest
+private class QuadmindsTest {
+    
+    @testSetup static void setup() {
+        // Create common test accounts
+        List<Account> testAccts = new List<Account>();
+        Account MuniTandil = new Account (
+          Cod__c = 'C7249',
+          Codigo_Padre__c = 'C7249',
+          Name = 'Municipalidad De Tandil'
+        );
+        Account Ugarte = new Account (
+          Cod__c = 'C2847',
+          Codigo_Padre__c = 'C2847',
+          Name = 'Ugarte Roberto -Azul-'
+        );
+        testAccts.add(MuniTandil);
+        testAccts.add(Ugarte);
+        insert testAccts;
+		List<Establecimiento__c> testEstab = new List<Establecimiento__c>();
+        Establecimiento__c EJ = new Establecimiento__c (
+        	Name = 'Delegacion Gardey - Municipalidad De Tandil',
+            Codigo_cuenta__c = 'C7249',
+            Numero_de_establecimiento__c = 0,
+            Cuenta__c = MuniTandil.Id,
+            Id_Quadminds__c = 99348529,
+            Estado__c = 'SUSPENDIDO'
+        );
+        testEstab.add(EJ);
+        insert testEstab;
+        QuadmindsConfig__c cs = new QuadmindsConfig__c(
+        	Key__c = 'x-saas-apikey',
+        	endPoint__c = 'https://flash-api.quadminds.com/api/v2/pois/search?limit=200&offset=',
+        	Value__c = 'JxZYkDXOUcrYcaIwJeuYH853UtA5OIFdPCrkY8dx',
+            Limite__c = '200'
+        );
+        insert cs;
+    }
+    
+    @isTest static void testgetPois(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceQuadminds');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application/json');
+        Test.setMock(HttpCalloutMock.class, mock);
+        
+        Test.startTest();
+        HttpResponse response = Quadminds.getPois('0');
+        Test.stopTest();
+        System.assertEquals(200,response.getStatusCode(), 'The status code Ok.');
+        System.assertEquals('application/json', response.getHeader('Accept'));
+    }
+    
+    @isTest static void testgetPoisError(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceQuadminds');
+        mock.setStatusCode(201);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        HttpResponse response = Quadminds.getPois('0');
+        Test.stopTest();
+        System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    @isTest static void testEstablecimientos(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceQuadminds');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        Quadminds.procesarEstablecimientos();
+        Test.stopTest();
+        List<Establecimiento__c> establecimientosTest = New List<Establecimiento__c>();
+        establecimientosTest = [
+        				SELECT  Id_Quadminds__c,Estado__c,Name
+        				FROM    Establecimiento__c
+        				WHERE   Id_Quadminds__c = 99348529
+    				];
+        Establecimiento__c prueba = (Establecimiento__c)establecimientosTest.get(0);
+        //System.debug(prueba);
+        System.assertEquals('HABILITADO',establecimientosTest.get(0).Estado__c,'estado esta HABILITADO');
+        //System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        //System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    @isTest static void testEstablecimientosCantidad(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceQuadminds');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        Quadminds.procesarEstablecimientos();
+        Test.stopTest();
+        List<Establecimiento__c> establecimientosTest = New List<Establecimiento__c>();
+        establecimientosTest = [
+        				SELECT  Id_Quadminds__c,Estado__c,Name
+        				FROM    Establecimiento__c
+    				];
+        
+        System.assertEquals(2,establecimientosTest.size(),'cantidad de establecimientos correcta');
+        //System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        //System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    
+}
