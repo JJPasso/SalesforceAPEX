@@ -1,0 +1,549 @@
+public class Abaco {
+    
+    public static HttpResponse getClientes(){
+        //Llamada a la api de Abaco, recuperamos token de 60 minutos
+       	AbacoConfig__c cs = AbacoConfig__c.getInstance();
+		String user = cs.Key__c;
+        String pass = cs.Value__c;
+        String urlToken = cs.EndpointToken__c;
+        String url = cs.Endpoint__c;
+        Http http = new Http();
+    	HttpRequest request = new HttpRequest();
+    	request.setEndpoint(urlToken);
+    	request.setMethod('POST');
+    	request.setHeader('content-type', 'application/json');
+        request.setBody('{"email":"'+user+'","pass":"'+pass+'"}');
+        String username = user;
+     	String password = pass;
+  
+     	Blob headerValue = Blob.valueOf(username + ':' + password);
+     	String authorizationHeader = 'Basic ' +
+     	EncodingUtil.base64Encode(headerValue);
+     	request.setHeader('Authorization', authorizationHeader);
+        HttpResponse token = http.send(request);
+        System.debug('token');
+        System.debug(token);
+        //Una vez obtenido el token, mandamos la consulta de clientes
+        try{
+        	if(token.getStatusCode() == 200) {
+            
+        		System.debug('Respuesta correcta');
+                    
+            	//Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        		List<Object> results = (List<Object>)JSON.deserializeUntyped(token.getBody());
+            	// Armamos una lista de clientes con la data que vino de la API
+        		System.debug(results);
+            	Map<string,Object> oToken = (Map<string,Object>)results.get(0);
+                System.debug(oToken);
+                string key = (string) oToken.get('token');
+                System.debug(key);
+        		HttpRequest request2 = new HttpRequest();
+            	request2.setEndpoint(url);
+				request2.setMethod('GET');
+				request2.setHeader('Authorization','Bearer '+key);
+            	HttpResponse result = http.send(request2);
+            	//System.debug(result.getBody());
+        		return result;
+        	}else{
+            	HttpResponse result = new HttpResponse();
+                result.setStatus('404');
+            	System.debug('error');
+            	return result;
+        	}
+        }
+        catch (System.Exception e){
+            System.debug(e);
+            HttpResponse result = new HttpResponse();
+            result.setStatus('404');
+            System.debug('error');
+            return result;
+        }
+        
+    }
+    
+    @future (callout=true)
+    public static void procesarCuentas(){
+		//Declaracion del log
+        Log__c log = new Log__c();     
+        log.put('Name','Cuentas Abaco');
+        Datetime hoy = Datetime.now();
+        System.debug('Fecha de hoy: '+hoy);
+        log.put('Fecha_de_ejecucion__c',hoy);
+        
+        //Variables para el Log
+        Time inicio = hoy.time();
+        System.debug('Hora de inicio: '+inicio);
+        Integer horaInicio = inicio.hour();
+		Integer minutosInicio =inicio.minute();
+		Integer segundosInicio =inicio.second();
+        String detalleStr = '';
+        Boolean hayErrores = false;
+        //Declaracion de listas para enviar a los metodos correspondientes
+        List<Map<String, Object>> listClientesActualizar = New List<Map<String, Object>>();
+        List<Map<String, Object>> listClientesCreate = New List<Map<String, Object>>();
+        //Iteracion de llamadas para traer y filtrar todas las novedades
+                //Primero hago un get de todos las cuentas
+    			HttpResponse response = Abaco.getClientes();
+    			//Si la respuesta es correcta continuamos el proceso
+                if(response.getStatusCode() == 200) {
+                    System.debug('Respuesta correcta');
+                    //Seteo la fecha de ayer para buscar novedades
+                    Datetime ayer = hoy.addDays(-1);
+                    System.debug('Fecha de update buscada: ' + ayer.date());
+            		//Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        			List<Object> clientes = (List<Object>) JSON.deserializeUntyped(response.getBody());
+                    //Lista de codigos que vamos a buscar en la base de SF para ver si hay que actualizar o crear
+        			List<string> listPrincipal = New List<string>();
+                    //Lista de clientes con todos sus atributos
+            		List<Map<String, Object>> listClientesAProcesar = New List<Map<String, Object>>();
+            		//Por cada cliente revisamos si es novedad y lo añadimos en las listas que vamos a procesar
+            		for(Object cliente: clientes) {
+                			//Casteamos el cliente a un map para acceder mas facil a los datos
+            				Map<String, Object> clienteCasteado = (Map<String, Object>) cliente;
+                			//System.debug(clienteCasteado.get('codigo_padre'));
+                			//get de variables para filtro
+                        if (clienteCasteado.get('fechaupdate') != null){
+                            String updatedAtstr = clienteCasteado.get('fechaupdate').toString().substring(0,10);
+                            Integer year = Integer.valueOf(updatedAtstr.substring(0,4));
+                            Integer month = Integer.valueOf(updatedAtstr.substring(5,7));
+                            Integer day = Integer.valueOf(updatedAtstr.substring(8,10));
+                            Date updatedAt = Date.newInstance(year, month, day);
+                            System.debug('Date cliente: '+updatedAt);
+                        	System.debug('Nombre cliente');
+                    		//Guardo los codigos padres para conseguir la lista de los que ya estan en el crm
+                    		//Control de duplicados y de novedades
+                    		// (!listPrincipal.contains((string)clienteCasteado.get('cod')) && updatedAt == ayer.date())
+                    		
+                        if (!listPrincipal.contains((string)clienteCasteado.get('cod'))){
+                                listPrincipal.add((string)clienteCasteado.get('cod').toString());
+                                //Guardo los clientes que quiero crear o actualizar en otra lista aparte
+                                listClientesAProcesar.add(clienteCasteado);
+                        }else{
+                            System.debug('duplicados');
+                            System.debug((string)clienteCasteado.get('cod'));
+                        }
+                        }else{
+                            string cp = (string)clienteCasteado.get('cod').toString();
+                            detalleStr = detalleStr + 'Error cuenta: '+cp+' no fue cargada por tener el campo fechaupdate null ';
+                    		hayErrores = true;
+                        }
+        			}
+                    System.debug( 'list principal' );
+                    System.debug(listPrincipal.size());
+            		//Busqueda de ids que ya existen en SF
+        			List<Account> cuentasExistentes = New List<Account>();
+      				cuentasExistentes = [
+        				SELECT  Cod__c
+        				FROM    Account
+        				WHERE   Cod__c IN :listPrincipal
+    				];
+        			System.debug( 'cuentasExistentes' );
+                    System.debug( cuentasExistentes.size());
+        			//System.debug( cuentasExistentes );
+            		//Armo un Map con los Codigos Padres. Esta estructura es util para consultas existenciales
+            		//La usamos para separar los clientes que hay que actualizar de los que hay que crear
+            		Map<string,Id> mapCPExistentes = New Map<string,Id>();
+                    // vamos a hacer un control de codigos de cuentas duplicados
+            		for(Account cExistente : cuentasExistentes){
+                		string cp = cExistente.Cod__c;
+                		Id idSF = (Id)cExistente.id;
+                		mapCPExistentes.put(cp,idSf);
+            		}
+            		//Procesamiento de cada cliente
+            		for(Map<String, Object> cliente : listClientesAProcesar){
+                		string cp = (string)cliente.get('cod').toString();
+                		//Si el cp de Abaco del cliente esta en el map significa que ya esta en el crm y hay que actualizarlo
+                		if(mapCPExistentes.containsKey(cp)){
+                    		//Separo en una lista los clientes que hay que actualizar
+                    		Id idSF = mapCPExistentes.get(cp);
+                    		cliente.put('idSF',idSF);
+                    		listClientesActualizar.add(cliente);
+                            
+                    		System.debug('Actualizar:' + cliente.get('cod'));
+                		}
+                		else{
+                    		//Si no esta en sf hay que crear el registro, lo guardo en una lista para hacerlo masivamente
+                    		listClientesCreate.add(cliente); 
+                    		System.debug('Crear:' + cliente.get('cod').toString());
+                		}
+            		}  
+                }
+                else{
+                    //Status code distinto a 200
+                    detalleStr = detalleStr + 'Error en llamada a Abaco, codigo: '+String.valueOf(response.getStatusCode())+'; ';
+                    hayErrores = true;
+                }
+            
+        
+        //Llamadas a metodos que se encargan de la actualizacion y creacion masiva
+        Integer cantActualizados = UpdateCuentas(listClientesActualizar);
+		Integer cantCreados = CreateCuentas(listClientesCreate);
+        if(cantActualizados == -1){
+            hayErrores = true;
+            detalleStr = detalleStr + 'ERROR AL ACTUALIZAR REGISTROS';
+        }
+        if(cantCreados == -1){
+            hayErrores = true;
+            detalleStr = detalleStr + 'ERROR AL CREAR REGISTROS';
+        }
+        log.put('Registros_actualizados__c',cantActualizados);
+        log.put('Registros_creados__c',cantCreados);
+        Time fin = Datetime.now().time();
+		System.debug('Hora de fin'+fin);		
+		Integer horaFin = fin.hour();
+		Integer minutosFin =fin.minute();
+		Integer segundosFin =fin.second();
+		Time duracion = Time.newInstance(horaFin - horaInicio, minutosFin - minutosInicio, segundosFin - segundosInicio,0);
+		System.debug('Duracion del proceso: '+duracion);
+        log.put('Duracion__c',duracion);
+        String resultado;
+        if(! hayErrores){
+            detalleStr = 'Sin errores';
+            resultado = 'CORRECTO';
+        }
+        else{
+            resultado = 'CON ERRORES';
+        }
+        log.put('Detalle__c',detalleStr);
+        log.put('Resultado__c',resultado);
+        insert(log);
+    }
+    
+	public static Integer UpdateCuentas(List<Map<String, Object>> Old){
+    	if (!Old.isEmpty()){
+    		// recopilo ids
+       		List<Account> news = New List<Account>();
+            Map<Decimal,Id> usuariosCRM = buscarUsuarios();
+       		// armar lista new para update
+       		for(Map<String, Object> cliente: Old) {
+        		//System.debug(cliente);
+        		// para obtener todos sus datos y cargarlos masivamente
+        		boolean ctacte = false;
+                if( cliente.get('tienectacte') != null){
+                       ctacte  = cliente.get('tienectacte') == 'X' ? true : false;
+                    }
+                string email = '';
+                if( cliente.get('email') != null){
+                		String valorEmail  = (string) cliente.get('email').toString();
+                		email = limpiarMail(valorEmail);
+                 }
+                string telef = '';
+                if( cliente.get('telefono') != null){
+                       telef  =  (string) cliente.get('telefono').toString();
+                 		if(telef.length() >= 40){
+                        	telef  =  telef.substring(0,39);
+                        }
+                 }
+        		String idciudad;
+                idciudad =  String.valueOf(cliente.get('idciudad'));
+             
+                string name = '';
+                if( cliente.get('nombre') != null){
+                       name  = (string) cliente.get('nombre').toString();
+                    }
+                string cp = '';
+                if( cliente.get('codigo_padre') != null){
+                       cp  = (string) cliente.get('codigo_padre').toString();
+                    }
+                String sic = '';
+                if( cliente.get('cuit') != null){
+                       sic  = cliente.get('cuit').toString();
+                    }
+                string industry = '';
+                if( cliente.get('rubro_cliente') != null){
+                       industry  = (string) cliente.get('rubro_cliente').toString();
+                    }
+                string street = '';
+                if( cliente.get('domicilio') != null){
+                       street  = cliente.get('domicilio').toString();
+                    }
+                string rating = '';
+                if( cliente.get('cat_abcd') != null){
+                       rating  = (string) cliente.get('cat_abcd').toString();
+                    }
+                string cod = '';
+                if( cliente.get('cod') != null){
+                       cod  = (string) cliente.get('cod').toString();
+                    }
+                Decimal idrrcc;
+                        if(cliente.get('id_rrcc') != null){
+                            idrrcc = (Decimal) cliente.get('id_rrcc');
+                        }
+           		try {
+                    // Creacion del cliente en memoria
+             		Account NewCuenta = new Account ();
+                	NewCuenta.id = (Id)cliente.get('idSF');
+					NewCuenta.Name = name;
+                    NewCuenta.Cod__c = cod;
+                    NewCuenta.Codigo_Padre__c = cp;
+                    NewCuenta.Sic = sic;
+                    NewCuenta.Industry = industry;
+                    NewCuenta.BillingPostalCode = idciudad;
+                    NewCuenta.BillingStreet = street;
+                    NewCuenta.Rating = rating;
+                    if (telef != null){
+                        	NewCuenta.Phone = telef;
+                        }
+                    NewCuenta.Tiene_cuenta_corriente__c = ctacte;
+                    if (email != null){
+                        NewCuenta.Correo_Electronico__c = email;
+                        System.debug(email);
+                     }
+                    if(usuariosCRM.containsKey(idrrcc)){
+                          NewCuenta.OwnerId = usuariosCRM.get(idrrcc);
+                      }
+                	//System.debug(NewCuenta);
+                    //lo agrego a la lista de news
+                	news.add(NewCuenta);
+         		}
+         		catch (System.NullPointerException e) {
+		 			System.debug('Null pointer exc: '+cliente);
+        		}
+			}
+        	//Update masivo
+        	try {
+    			update news;
+            	system.debug( news );
+			} catch (DmlException e) {
+    			System.debug(e);
+                return -1;
+			}
+            return news.size();
+		}
+        else{
+           System.debug('No hay registros para actualizar');
+           return 0;
+       }
+	}
+
+   public static Integer CreateCuentas(List<Map<String, Object>> create){
+   		if (!create.isEmpty()){
+        	List<Account> cuentasNoExistentes = New List<Account>();
+            Map<String,List<String>> MapCPContactos = New Map<String,List<String>>();
+            List<String> listCodigos = New List<String>();
+            Map<Decimal,Id> usuariosCRM = buscarUsuarios();
+            Map<string,Id> contactsCRM = buscarContactos();
+            
+            List<AccountContactRelation> listaRelaciones = new List<AccountContactRelation>();
+
+        	for(Map<String, Object> cliente: create) {
+        		// consultamos los registros que no existen en salesforce 
+        		// para obtener todos sus datos y cargarlos masivamente
+        				// 1ero contacto 2do email 3er telef
+                		List<String> camposContacto = new List<String>();
+                		string contacto;
+                        if( cliente.get('contacto') != null){
+                                contacto = (string) cliente.get('contacto').toString(); 	
+                         }
+                		
+                		Account NewCuenta = new Account ();
+                		boolean ctacte = false;
+                		if( cliente.get('tienectacte') != null){
+                       		ctacte  = cliente.get('tienectacte') == 'X' ? true : false;
+                    	}
+                		string email;
+                        if( cliente.get('email') != null){
+                                String valorEmail  = (string) cliente.get('email').toString();
+                                email = limpiarMail(valorEmail);
+                        }
+                		
+                		string telef;
+                		if( cliente.get('telefono') != null){
+                       		telef  =  (string) cliente.get('telefono').toString();
+                            if(telef.length() >= 40){
+                                telef  =  telef.substring(0,39);
+                            }
+                        }
+                		
+                		String idciudad;
+                		idciudad =  String.valueOf(cliente.get('idciudad'));
+                        string name = '';
+                        if( cliente.get('nombre') != null){
+                               name  = (string) cliente.get('nombre').toString();
+                            }
+                        string cp = '';
+                        if( cliente.get('codigo_padre') != null){
+                               cp  = (string) cliente.get('codigo_padre').toString();
+                            	listCodigos.add(cp);
+                            }
+                        String sic = '';
+                			if( cliente.get('cuit') != null){
+                       			sic  = cliente.get('cuit').toString();
+                    		}
+                        string industry = '';
+                        if( cliente.get('rubro_cliente') != null){
+                               industry  = (string) cliente.get('rubro_cliente').toString();
+                            }
+                        string street = '';
+                        if( cliente.get('domicilio') != null){
+                               street  = cliente.get('domicilio').toString();
+                            }
+                        string rating = '';
+                        if( cliente.get('cat_abcd') != null){
+                               rating  = (string) cliente.get('cat_abcd').toString();
+                            }
+                		Decimal idrrcc;
+                        if(cliente.get('id_rrcc') != null){
+                            idrrcc = (Decimal) cliente.get('id_rrcc');
+                        }
+                		string cod = '';
+                		if( cliente.get('cod') != null){
+                       	cod  = (string) cliente.get('cod').toString();
+                    	}
+                	try{
+							NewCuenta.Name = name;
+                            NewCuenta.Codigo_Padre__c = cp;
+                        	NewCuenta.Cod__c = cod;
+                    		NewCuenta.Sic = sic;
+                        	NewCuenta.Industry = industry;
+                        	NewCuenta.BillingPostalCode = idciudad;
+                        	NewCuenta.BillingStreet = street;
+                        	NewCuenta.Rating = rating;
+                        if (telef != null){
+                        	NewCuenta.Phone = telef;
+                        }
+                        	NewCuenta.Tiene_cuenta_corriente__c = ctacte;
+                        if (email != null){
+                        	NewCuenta.Correo_Electronico__c = email;
+                        }
+                        	NewCuenta.Type = 'Cliente';
+                        	NewCuenta.Deuda_sin_aplicar__c = 0;
+                        	NewCuenta.Deuda_a_vencer__c = 0;
+                        	NewCuenta.Deuda_hasta_7_dias__c = 0;
+                        	NewCuenta.Deuda_de_8_a_15_dias__c = 0;
+                        	NewCuenta.Deuda_de_16_a_30_dias__c = 0;
+                        	NewCuenta.Deuda_de_31_a_60_dias__c = 0;
+                        	NewCuenta.Deuda_mas_de_60_dias__c = 0;
+                        	NewCuenta.Deuda_mas_de_60_dias__c = 0;
+                        	NewCuenta.Deuda_Total__c = 0;
+                        	NewCuenta.Credito_disponible__c = 0;
+                        	if(usuariosCRM.containsKey(idrrcc)){
+                                NewCuenta.OwnerId = usuariosCRM.get(idrrcc);
+                                //PropietarioPredeterminado__c predet = PropietarioPredeterminado__c.getInstance();
+                                //NewCuenta.OwnerId = predet.Id_usuario_SF__c;
+                            }
+                        	else{
+                                PropietarioPredeterminado__c predet = PropietarioPredeterminado__c.getInstance();
+                                NewCuenta.OwnerId = predet.Id_usuario_SF__c;
+                            }
+                        }catch (System.NullPointerException e) {
+                            System.debug('Null pointer exc: ');
+                           
+                        }
+                		System.debug(NewCuenta);
+                		cuentasNoExistentes.add(NewCuenta);
+                if (contacto != null && email != null && contacto != ''){
+                		camposContacto.add(contacto);
+                		camposContacto.add(email);
+                		camposContacto.add(telef);
+                		MapCPContactos.put(cp,camposContacto);
+                        
+                }
+       		}
+            //Insert masivo
+            List<Contact> listContactoCrear = new List<Contact>();
+            try {
+    			insert cuentasNoExistentes;
+            	system.debug( cuentasNoExistentes );
+                // buscar las cuentas creada
+                List<Account> cuentasCreadas = New List<Account>();
+      				cuentasCreadas = [
+        				SELECT  Codigo_Padre__c,OwnerId
+        				FROM    Account
+        				WHERE   Codigo_Padre__c IN :listCodigos
+    				];
+                // insertar id de la cuenta en cada contacto nuevo que se crea
+                // CASO CREACION DE CONTACTO
+                
+                for (Account c : cuentasCreadas){
+                    string cp = c.Codigo_Padre__c;
+                    List<string> campos = MapCPContactos.get(cp);
+                    if (campos != null){
+                        Id identificador = null;
+                    	identificador = contactsCRM.get(campos[0]);
+                            if (identificador != null){
+                               //Si existe creamos una relacion entre la cuenta y el contacto
+                                AccountContactRelation relacion = new AccountContactRelation();
+                                relacion.AccountId = c.id;
+                                relacion.ContactId = identificador;
+                                relacion.IsActive = true;
+                                listaRelaciones.add(relacion);
+                            }else{
+                                //if (campos[0] != null && campos[1] != null){
+                                    Contact newcontact = new Contact();
+                                    newcontact.LastName = campos[0];
+                                    newcontact.Email = campos[1];
+                                    if (campos[2] != null){
+                                        newcontact.Phone = campos[2];
+                                        }
+                                    newcontact.AccountId = c.Id;
+                                    newcontact.OwnerId = c.OwnerId;
+                                    listContactoCrear.add(newcontact);
+                            }
+                        
+                    	}
+                   }
+             
+			} catch (Exception e) {
+    			System.debug(e);
+                return -1;
+			}
+            try{
+                // insert contactos
+                insert listContactoCrear;
+                insert listaRelaciones;
+            
+            } catch (Exception e) {
+    			System.debug(e);
+                
+			}
+            System.debug('contactos creados'+listContactoCrear.size());
+            System.debug('cuentas creadas'+cuentasNoExistentes.size());
+            System.debug('relaciones creadas'+listaRelaciones.size());
+            return cuentasNoExistentes.size() + listContactoCrear.size() + listaRelaciones.size();
+      }
+       else{
+           System.debug('No hay registros para crear');
+           return 0;
+       }
+      
+	}
+    
+    public static String limpiarMail(String valor){
+        //System.debug(valor);
+        String email = valor.substringBefore(',');
+        String regex = '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(\\.[a-zA-Z]{2,})?';
+        return (Pattern.matches(regex, email)) ? email : '';
+    }
+    
+    public static Map<Decimal,Id> buscarUsuarios(){
+        List<User> usuarios = new List<User>();
+        usuarios = [
+            SELECT  Id,id_rrcc__c
+            FROM    User
+            WHERE id_rrcc__c != null
+        ];
+        System.debug('USuarios: '+usuarios);
+        Map<Decimal,Id> usuariosCRM = new Map<Decimal,Id>();
+        for(User u : usuarios){
+            usuariosCRM.put(u.id_rrcc__c,u.Id);
+		}
+        return usuariosCRM;
+    }
+    
+    public static Map<string,Id> buscarContactos(){
+        List<Contact> contactos = new List<Contact>();
+        contactos = [
+            SELECT  Id,Name
+            FROM    Contact
+        ];
+        Map<string,Id> contactosCRM = new Map<string,Id>();
+        for(Contact c : contactos){
+            contactosCRM.put(c.Name,c.Id);
+		}
+        return contactosCRM;
+        
+    }
+    
+
+}
