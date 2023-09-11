@@ -1,0 +1,72 @@
+@isTest
+private class DeudaTest {
+	@testSetup static void setup() {
+        // Create common test accounts
+        List<Account> testAccts = new List<Account>();
+        Account paco = new Account (
+          Codigo_Padre__c = 'C0025',
+          Cod__c = 'C0025',
+          Name = 'Donati Cesar (L)'
+        );
+        testAccts.add(paco);
+        insert testAccts;
+        DeudaConfig__c cs = new DeudaConfig__c(
+        	endPointToken__c = 'https://gestion.petrotandil.com.ar/rest/rpc/login',
+        	endPoint__c = 'https://gestion.petrotandil.com.ar:443/rest/v_deuda_clientes_consolidada?limit=',
+        	user__c = 'api@petrotandil.com.ar',
+        	pass__c = 'apiuser',
+        	Limite__c = '200'
+        );
+        insert cs;
+    }
+    
+    @isTest static void testGetDeudas(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceDeuda');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application/json');
+        Test.setMock(HttpCalloutMock.class, mock);
+        
+        Test.startTest();
+        HttpResponse response = Deuda.getDeuda('0');
+        Test.stopTest();
+        System.assertEquals(200,response.getStatusCode(), 'The status code Ok.');
+        System.assertEquals('application/json', response.getHeader('Accept'));
+    }
+    
+    @isTest static void testgetDeudaError(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceDeuda');
+        mock.setStatusCode(201);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        HttpResponse response = Deuda.getDeuda('0');
+        Test.stopTest();
+        System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    @isTest static void testActualizarDeudaPesos(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceDeuda');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application/json');
+        Test.setMock(HttpCalloutMock.class, mock);
+        
+        Test.startTest();
+        Deuda.procesarDeuda();
+        Test.stopTest();
+        
+        List<Account> cuentasTest = New List<Account>();
+        cuentasTest = [
+        				SELECT  Deuda_Total__c
+        				FROM    Account
+        				WHERE   Cod__c = 'C0025'
+    				];
+        Decimal DeudaTotalc = cuentasTest.get(0).Deuda_Total__c;
+        System.assertEquals(0,DeudaTotalc, 'Deuda actualizado correctamente');
+    }
+    
+    
+}
