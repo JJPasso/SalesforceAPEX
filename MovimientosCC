@@ -1,0 +1,351 @@
+public class MovimientosCC {
+	public static HttpResponse getPois(String offset){
+        //Llamada a la api de Abaco, recuperamos token de 60 minutos
+        MovimConfig__c cs = MovimConfig__c.getInstance();
+        String urlToken = cs.endPointToken__c;
+        String url = cs.endPoint__c;
+        String user = cs.user__c;
+        String pass = cs.pass__c;
+        String limite = cs.Limite__c;
+        Http http = new Http();
+    	HttpRequest request = new HttpRequest();
+    	request.setEndpoint(urlToken);
+    	request.setMethod('POST');
+    	request.setHeader('content-type', 'application/json');
+        request.setBody('{"email":"'+user+'","pass":"'+pass+'"}');
+        
+  
+     	Blob headerValue = Blob.valueOf(user + ':' + pass);
+     	String authorizationHeader = 'Basic ' +
+     	EncodingUtil.base64Encode(headerValue);
+     	request.setHeader('Authorization', authorizationHeader);
+        HttpResponse token = http.send(request);
+        System.debug('token');
+        System.debug(token);
+        //Una vez obtenido el token, mandamos la consulta de clientes
+        try{
+        	if(token.getStatusCode() == 200) {
+            
+        		System.debug('Respuesta correcta');
+                    
+            	//Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        		List<Object> results = (List<Object>)JSON.deserializeUntyped(token.getBody());
+            	// Armamos una lista de clientes con la data que vino de la API
+        		System.debug(results);
+            	Map<string,Object> oToken = (Map<string,Object>)results.get(0);
+                System.debug(oToken);
+                string key = (string) oToken.get('token');
+                System.debug(key);
+        		HttpRequest request2 = new HttpRequest();
+                string ayer = Datetime.now().addDays(-1).format('yyyy-MM-dd');
+                
+            	request2.setEndpoint(url+ayer+'&limit='+limite+'&offset=' + offset);
+                //request2.setEndpoint(url+'2023-04-28'+'&limit='+limite+'&offset=' + offset);
+				request2.setMethod('GET');
+                request2.setHeader('Content-Type', 'application/json');
+                request2.setHeader('Accept', 'application/json');
+				request2.setHeader('Authorization','Bearer '+key);
+            	HttpResponse result = http.send(request2);
+            	System.debug(result.getBody());
+        		return result;
+        	}else{
+            	HttpResponse result = new HttpResponse();
+                result.setStatus('404');
+            	System.debug('error');
+            	return result;
+        	}
+        }
+        catch (System.Exception e){
+            System.debug(e);
+            HttpResponse result = new HttpResponse();
+            result.setStatus('404');
+            System.debug('error');
+            return result;
+        }
+    }
+    
+    @future (callout=true)
+    public static void procesarMovimientos(){
+        //Declaracion del log
+        Log__c log = new Log__c();
+        log.put('Name','Movimientos de Cuenta Corriente');
+        Datetime hoy = Datetime.now();
+        System.debug('Fecha de hoy: '+hoy);
+        log.put('Fecha_de_ejecucion__c',hoy);
+        
+        //Variables para el Log
+        Time inicio = hoy.time();
+        System.debug('Hora de inicio: '+inicio);
+        Integer horaInicio = inicio.hour();
+		Integer minutosInicio =inicio.minute();
+		Integer segundosInicio =inicio.second();
+        String detalleStr = '';
+        Boolean hayErrores = false;
+        //Declaracion de listas para enviar a los metodos correspondientes
+        List<Map<String, Object>> listPoisAProcesar = New List<Map<String, Object>>();
+        List<Map<String, Object>> listPoisACreate = New List<Map<String, Object>>();
+        List<Map<String, Object>> listPoisActualizar = New List<Map<String, Object>>();
+        Map<String,Id> comprobantesExistentes = new Map<String,Id>();
+        List<string> codigosCuentas = New List<string>();
+        List<string> controlDuplicados = New List<string>();
+        //Declaracion de variables para paginacion
+       	MovimConfig__c cs = MovimConfig__c.getInstance();
+        Integer limite = Integer.valueOf(cs.Limite__c);
+        String hayLoop = 'si';
+        //Iteracion de llamadas para traer y filtrar todas las novedades
+        for (Integer index = 0; hayLoop == 'si' && index<20; index++){
+            	Integer limiteindex = index * limite;
+            	string offset = String.valueOf(limiteindex);
+                //Primero hago un get de todos los establecimientos
+    			HttpResponse response = MovimientosCC.getPois(offset);
+    			//Si la respuesta es correcta continuamos el proceso
+                if(response.getStatusCode() == 200) {
+                    System.debug('Respuesta correcta');
+                    
+            		//Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        			List<Object> results = (List<Object>) JSON.deserializeUntyped(response.getBody());
+            		// Armamos una lista de pois con la data que vino de la API
+        		
+                    if(results.size()<limite){
+                        // si levantó menos de 200 registros quiere decir que es la última página
+						hayLoop = 'no';
+                    }
+                    //Seteamos la fecha de ayer para ir descartando registros que no sean novedades
+        			Datetime ayer = hoy.addDays(-1);
+                    System.debug(ayer);
+        			System.debug('Fecha de update buscada: ' + ayer.date());
+                  
+            		
+            		for(Object poi: results) {
+                		//Casteamos el poi a un map para acceder mas facil a los datos
+            			Map<String, Object> poiCasteado = (Map<String, Object>) poi;
+                    		//Guardo los ids para conseguir la lista de los que ya estan en el crm
+                    		string nrocompr = (string) poiCasteado.get('nro_comp').toString() + poiCasteado.get('tipo_comp').toString();
+                        	//string nrocompr = (string) poiCasteado.get('nro_comp').toString();
+                        if(!controlDuplicados.contains(nrocompr)){
+                            	controlDuplicados.add(nrocompr);
+            					codigosCuentas.add((string)poiCasteado.get('codigocliente').toString());
+                    		//Guardo los pois que quiero crear o actualizar en otra lista aparte
+                    		listPoisAProcesar.add(poiCasteado);
+                            }else{
+                            //Informar en log codigo Duplicado!!
+                            hayErrores = true;
+                            System.debug('Codigo duplicado: '+nrocompr);
+                            detalleStr = detalleStr + 'Codigo duplicado: '+nrocompr+'; ';
+                        }
+        			}
+                }
+        }
+                    List<Account> cuentasAsociadas = New List<Account>();
+                    cuentasAsociadas = [
+        				SELECT  Cod__c,id
+        				FROM    Account
+        				WHERE   Cod__c IN :codigosCuentas
+    					];
+                    Map<string,Id> mapCAsociadas = New Map<string,Id>();
+                    // vamos a hacer un control de codigos de cuentas duplicados
+            		for(Account c : cuentasAsociadas){
+                		string cod = c.Cod__c;
+                		Id idSF = (Id)c.id;
+                		mapCAsociadas.put(cod,idSf);
+            		}
+                    comprobantesExistentes = buscarComprobantesExistentes(); 
+                    for(Map<String, Object> poi: listPoisAProcesar){
+                        string cp = (string)poi.get('codigocliente');
+                		string cc = (string)poi.get('nro_comp')+(string)poi.get('tipo_comp');
+                        //si el comprobante no esta en el crm se crea sino se actualiza
+                        if(!comprobantesExistentes.containsKey(cc)){
+                            //Si el cp de Abaco del cliente esta en el map significa que ya esta en el crm y hay que actualizarlo
+                            
+                            if(mapCAsociadas.containsKey(cp)){
+                                //Separo en una lista los clientes que hay que actualizar
+                                Id idSF = mapCAsociadas.get(cp);
+                                poi.put('id',idSF);
+                                listPoisACreate.add(poi);
+                                
+                                System.debug('Movimientos a crear:' + poi.get('nombrecliente')); 
+                                }
+                        }else{
+                           
+                                //Separo en una lista los clientes que hay que actualizar
+                                Id idSF = mapCAsociadas.get(cp);
+                                poi.put('id',idSF);
+                                poi.put('idsf',comprobantesExistentes.get(cc));
+                                listPoisActualizar.add(poi);
+                                
+                                System.debug('Movimientos a actulizar:' + poi.get('nombrecliente')); 
+                                
+                        }
+            	}
+        	
+        log.Registros_creados__c = CreateMovimientos(listPoisACreate);
+        log.Registros_actualizados__c = ActulizarMovimientos(listPoisActualizar);
+        Time fin = Datetime.now().time();
+		System.debug('Hora de fin'+fin);		
+		Integer horaFin = fin.hour();
+		Integer minutosFin =fin.minute();
+		Integer segundosFin =fin.second();
+		Time duracion = Time.newInstance(horaFin - horaInicio, minutosFin - minutosInicio, segundosFin - segundosInicio,0);
+		System.debug('Duracion del proceso: '+duracion);
+        log.put('Duracion__c',duracion);
+        String resultado;
+        if(! hayErrores){
+            detalleStr = 'Sin errores';
+            resultado = 'CORRECTO';
+        }
+        else{
+            resultado = 'CON ERRORES';
+        }
+        log.Detalle__c = detalleStr;
+        log.Resultado__c = resultado;
+        insert(log);
+    			
+  		
+    }
+    
+    public static Integer CreateMovimientos(List<Map<String, Object>> create){
+   		if (!create.isEmpty()){
+
+        	List<Movimiento_de_Cta_Cte__c> nuevosMovs = New List<Movimiento_de_Cta_Cte__c>();
+        	for(Map<String, Object> poi: create) {
+                	Movimiento_de_Cta_Cte__c NewMov = new Movimiento_de_Cta_Cte__c ();
+                		
+                		
+                		Id identity;
+                        if( poi.get('id') != null){
+                                identity = (Id)poi.get('id');
+                         }
+                		string moneda = '';
+                		if( poi.get('moneda') != null){
+                       		moneda  =  (string) poi.get('moneda').toString();
+                        }
+                		Decimal total;
+                		total =  (Decimal)poi.get('total');
+                        string nroComp = '';
+                        if( poi.get('nro_comp') != null){
+                               nroComp  = (string) poi.get('nro_comp').toString();
+                            }
+                        string tipoComp = '';
+                        if( poi.get('tipo_comp') != null){
+                               tipoComp  = (string) poi.get('tipo_comp').toString();
+                            }
+                        String detalle = '';
+                			if( poi.get('detalle') != null){
+                       			detalle  = poi.get('detalle').toString();
+                    		}
+                        string status = '';
+                        if( poi.get('estado') != null){
+                               status  = (string) poi.get('estado').toString();
+                            }
+                        Date fechaComp;
+                        if( poi.get('fecha_comp') != null){
+                               fechaComp  = date.valueOf(poi.get('fecha_comp').toString());
+                            }
+                        Date fechaVto;
+                        if( poi.get('fecha_vto') != null){
+                               fechaVto  = date.valueOf(poi.get('fecha_vto').toString());
+                            }
+                		integer idAbaco = null;
+                		if( poi.get('id_comprobante') != null){
+                               System.debug('Id Abaco');
+                               System.debug(poi.get('id_comprobante'));
+                               idAbaco  = Integer.valueOf(poi.get('id_comprobante'));
+                               System.debug('Id Abaco int');
+                               System.debug(idAbaco);
+                            }
+                	try{
+                        	NewMov.id_Abaco__c = String.valueOf(idAbaco);
+                            NewMov.Detalle__c = detalle;
+                    		NewMov.Nombre_Cuenta__c = identity;
+                        	NewMov.Estado__c = status;
+                        	NewMov.Moneda__c = moneda;
+                        	NewMov.Total__c = total;
+                        	NewMov.Fecha_de_Comprobante__c = fechaComp;
+                        	NewMov.Fecha_de_Vencimiento__c = fechaVto;
+                        	NewMov.Numero_de_Comprobante__c = nroComp;
+                        	NewMov.Tipo_de_Comprobante__c = tipoComp;
+                        	NewMov.Comprobante_disponible_en_tienda__c = true;
+                        }catch (System.NullPointerException e) {
+                            System.debug('Null pointer exc: ');
+                           
+                        }
+                		System.debug(NewMov);
+                		nuevosMovs.add(NewMov);    
+       		}
+            //Insert masivo
+            try {
+    			insert nuevosMovs;
+            	system.debug( nuevosMovs );
+			} catch (DmlException e) {
+    			System.debug(e);
+			}
+            return nuevosMovs.size();
+      }
+       else{
+           System.debug('No hay registros para crear');
+           return 0;
+       }
+    }
+    
+    public static Map<String,Id> buscarComprobantesExistentes(){
+        Map<String,Id> comprobantesExistentes = new Map<String,Id>();
+        
+        List<Movimiento_de_Cta_Cte__c> comprobantes = New List<Movimiento_de_Cta_Cte__c>();
+      	comprobantes = [
+        	SELECT  Numero_de_Comprobante__c,Tipo_de_Comprobante__c,Estado__c
+        	FROM    Movimiento_de_Cta_Cte__c
+    	];
+        for(Movimiento_de_Cta_Cte__c m : comprobantes){
+            String cs = m.Numero_de_Comprobante__c + m.Tipo_de_Comprobante__c;
+            Id idSF = (Id)m.id;
+            comprobantesExistentes.put(cs,idSF);
+        }
+        
+        
+        return comprobantesExistentes;
+    }
+    
+    public static Integer ActulizarMovimientos(List<Map<String, Object>> create){
+   		if (!create.isEmpty()){
+
+        	List<Movimiento_de_Cta_Cte__c> nuevosMovs = New List<Movimiento_de_Cta_Cte__c>();
+        	for(Map<String, Object> poi: create) {
+                	Movimiento_de_Cta_Cte__c NewMov = new Movimiento_de_Cta_Cte__c ();
+                		
+                		
+                		Id identity;
+                        if( poi.get('idsf') != null){
+                                identity = (Id)poi.get('idsf');
+                         }
+                		
+                        string status = '';
+                        if( poi.get('estado') != null){
+                               status  = (string) poi.get('estado').toString();
+                            }
+                        
+                	try{
+                            NewMov.Id = identity;
+                        	NewMov.Estado__c = status;
+                        	
+                        }catch (System.NullPointerException e) {
+                            System.debug('Null pointer exc: ');
+                           
+                        }
+                		System.debug(NewMov);
+                		nuevosMovs.add(NewMov);    
+       		}
+            //Insert masivo
+            try {
+    			update nuevosMovs;
+            	system.debug( nuevosMovs );
+			} catch (DmlException e) {
+    			System.debug(e);
+			}
+            return nuevosMovs.size();
+      }
+       else{
+           System.debug('No hay registros para crear');
+           return 0;
+       }
+    }
+}
