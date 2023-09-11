@@ -1,0 +1,353 @@
+public class Deuda {
+	public static HttpResponse getDeuda(String offset){
+        DeudaConfig__c cs = DeudaConfig__c.getInstance();
+        string urlToken = cs.endPointToken__c;
+        string url = cs.endPoint__c;
+        string user = cs.user__c;
+        string pass = cs.pass__c;
+        string limite = cs.Limite__c;
+        Http http = new Http();
+    	HttpRequest request = new HttpRequest();
+    	request.setEndpoint(urlToken);
+    	request.setMethod('POST');
+    	request.setHeader('content-type', 'application/json');
+        request.setBody('{"email":"'+user+'","pass":"'+pass+'"}');
+
+     	Blob headerValue = Blob.valueOf(user + ':' + pass);
+     	String authorizationHeader = 'Basic ' +
+     	EncodingUtil.base64Encode(headerValue);
+     	request.setHeader('Authorization', authorizationHeader);
+        HttpResponse token = http.send(request);
+        System.debug('token');
+        System.debug(token);
+        //Una vez obtenido el token, mandamos la consulta de clientes
+        try{
+        	if(token.getStatusCode() == 200) {
+            
+        		System.debug('Respuesta correcta');
+                    
+            	//Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        		List<Object> results = (List<Object>)JSON.deserializeUntyped(token.getBody());
+            	// Armamos una lista de clientes con la data que vino de la API
+        		System.debug(results);
+            	Map<string,Object> oToken = (Map<string,Object>)results.get(0);
+                System.debug(oToken);
+                string key = (string) oToken.get('token');
+                System.debug(key);
+        		HttpRequest request2 = new HttpRequest();
+                string ayer = Datetime.now().addDays(-1).format('yyyy-MM-dd');
+            	request2.setEndpoint(url+limite+'&offset=' + offset);
+				request2.setMethod('GET');
+                request2.setHeader('Content-Type', 'application/json');
+                request2.setHeader('Accept', 'application/json');
+				request2.setHeader('Authorization','Bearer '+key);
+                request2.setTimeout(20000);
+            	HttpResponse result = http.send(request2);
+            	System.debug(result.getBody());
+        		return result;
+        	}else{
+            	HttpResponse result = new HttpResponse();
+                result.setStatus('404');
+            	System.debug('error');
+            	return result;
+        	}
+        }
+        catch (System.Exception e){
+            System.debug(e);
+            HttpResponse result = new HttpResponse();
+            result.setStatus('404');
+            System.debug('error');
+            return result;
+        }
+    }
+    
+    @future (callout=true)
+    public static void procesarDeuda(){
+		//Declaracion del log
+        Log__c log = new Log__c();     
+        log.put('Name','Deuda de Cliente Abaco');
+        Datetime hoy = Datetime.now();
+        System.debug('Fecha de hoy: '+hoy);
+        log.put('Fecha_de_ejecucion__c',hoy);
+        
+        //Variables para el Log
+        Time inicio = hoy.time();
+        System.debug('Hora de inicio: '+inicio);
+        Integer horaInicio = inicio.hour();
+		Integer minutosInicio =inicio.minute();
+		Integer segundosInicio =inicio.second();
+        String detalleStr = '';
+        Boolean hayErrores = false;
+        
+        //Declaracion de listas para enviar a los metodos correspondientes
+        List<Map<String, Object>> listComprobantesCrear = New List<Map<String, Object>>();
+        List<Map<String, Object>> listComprobantesActualizar = New List<Map<String, Object>>();
+        List<Account> listCuentasActualizar = New List<Account>();
+        List<String> listCodigos = New List<String>();
+        Map<String,List<Map<String,Object>>> MapCCDeuda = New Map<String,List<Map<String,Object>>>();
+        //Declaracion de variables para paginacion
+        DeudaConfig__c cs = DeudaConfig__c.getInstance();
+        String l = cs.Limite__c;
+        String hayLoop = 'si';
+        Integer limite = Integer.valueOf(l);
+       	Integer acc = 0;
+        for (Integer index = 0; hayLoop == 'si' && index<20; index++) {
+                Integer limiteindex = index * limite;
+            	string offset = String.valueOf(limiteindex);
+                //Primero hago un get de 200 limites
+    			HttpResponse response = getDeuda(offset);
+                //Si la respuesta es correcta continuamos el proceso
+                if(response.getStatusCode() == 200) {
+                    System.debug('Respuesta correcta');
+                    //Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        			List<Object> deudas = (List<Object>) JSON.deserializeUntyped(response.getBody());
+                    if(deudas.size()<limite){
+                        // si levantó menos de 200 registros quiere decir que es la última página
+						hayLoop = 'no';
+                        System.debug('--------------- FIN DE LA ACUMULACION DE LIMITES ---------------');
+                    }
+                    for (Object deuda : deudas){
+                        acc++;
+                        // Armamos map de codigo de cuentas : comprobantes 
+                        Map<String, Object> deudaCasteado = (Map<String, Object>) deuda;
+                        String cp = deudaCasteado.get('cod').toString();
+                            if(!MapCCDeuda.containsKey(cp)){
+                                List<Map<String,Object>> listDeuda = new List<Map<String,Object>>();
+                                listDeuda.add(deudaCasteado);
+                                MapCCDeuda.put(cp,listDeuda);
+                                if (!listCodigos.contains(cp)){
+                                	listCodigos.add(cp);
+                                }
+                                
+                            }
+                            else{
+                                List<Map<String,Object>> listComp = MapCCDeuda.get(cp);
+                                listComp.add(deudaCasteado);   
+                            }
+                        
+                    }
+                                
+                }
+                else{
+                    //Error en llamada!!
+                    hayErrores = true;
+                    detalleStr = detalleStr + 'Error en llamada a API, codigo: '+response.getStatusCode()+'; ';
+                }
+            
+        }
+        			System.debug(acc);
+        			//Estructura que relaciona codigos con Ids
+                    System.debug(listCodigos.size());
+                    Map<String,Account> cuentasExistentes = buscarCuentasExistentesDeuda(listCodigos);
+        			reiniciarDeuda(listCodigos);
+                    //Armado de lista de limites para actualizar
+                    
+                    for(String cp : listCodigos){
+                        if(cuentasExistentes.containsKey(cp)){
+                            List<Map<String,Object>> listComp = MapCCDeuda.get(cp);
+                            // guardamos id de las cuentas asociadas
+                            // calcular deuda con todos los comprobantes de la deuda
+                            if (!listCuentasActualizar.contains(cuentasExistentes.get(cp))){
+                                gestionarDeuda(cuentasExistentes.get(cp),listComp);
+                                listCuentasActualizar.add(cuentasExistentes.get(cp));
+                            }   
+                        }
+                        else{
+                            //La cuenta no esta en el crm
+                            hayErrores = true;
+                            detalleStr = detalleStr + 'La cuenta: '+cp+ ' no está en crm; ';
+                        }
+                    }    
+        //Actualizo los limites masivamente y obtengo la cantidad de actualizados
+        update listCuentasActualizar;
+        System.debug(listCuentasActualizar.size());
+        log.Registros_actualizados__c = listCuentasActualizar.size();
+        log.Registros_creados__c = 0;
+        Time fin = Datetime.now().time();
+		System.debug('Hora de fin'+fin);		
+		Integer horaFin = fin.hour();
+		Integer minutosFin =fin.minute();
+		Integer segundosFin =fin.second();
+		Time duracion = Time.newInstance(horaFin - horaInicio, minutosFin - minutosInicio, segundosFin - segundosInicio,0);
+		System.debug('Duracion del proceso: '+duracion);
+        log.put('Duracion__c',duracion);
+        String resultado;
+        if(! hayErrores){
+            detalleStr = 'Sin errores';
+            resultado = 'CORRECTO';
+        }
+        else{
+            resultado = 'CON ERRORES';
+        }
+        log.put('Detalle__c',detalleStr);
+        log.put('Resultado__c',resultado);
+        insert(log);
+        
+    }
+    
+    public static Map<String,Account> buscarCuentasExistentesDeuda(List<String> codigos){
+        Map<String,Account> cuentasExistentes = new Map<String,Account>();
+        List<Account> cuentas = New List<Account>();
+      	cuentas = [
+        	SELECT  Name,Cod__c,Deuda_mas_de_60_dias_USD__c,Deuda_de_31_a_60_dias_USD__c,Deuda_de_16__c,Deuda_de_8_a_15_dias_USD__c,Deuda_hasta_7_d_as_USD__c,Deuda_sin_ap__c,Deuda_Total_USD__c,Deudas_a_vencer_USD__c,Deuda_a_vencer__c,Deuda_de_16_a_30_dias__c,Deuda_de_31_a_60_dias__c,Deuda_de_8_a_15_dias__c,Deuda_hasta_7_dias__c,Deuda_mas_de_60_dias__c,Deuda_sin_aplicar__c,Deuda_Total__c
+        	FROM    Account
+        	WHERE   Cod__c IN :codigos
+    	];
+        for(Account c : cuentas){
+            String cp = c.Cod__c;
+            cuentasExistentes.put(cp,c);
+        }
+        
+        return cuentasExistentes;
+    }
+    
+    public static void reiniciarDeuda(List<String> codigos){
+        List<Account> cuentas = New List<Account>();
+      	cuentas = [
+        	SELECT  Name,Cod__c,Deuda_mas_de_60_dias_USD__c,Deuda_de_31_a_60_dias_USD__c,Deuda_de_16__c,Deuda_de_8_a_15_dias_USD__c,Deuda_hasta_7_d_as_USD__c,Deuda_sin_ap__c,Deuda_Total_USD__c,Deudas_a_vencer_USD__c,Deuda_a_vencer__c,Deuda_de_16_a_30_dias__c,Deuda_de_31_a_60_dias__c,Deuda_de_8_a_15_dias__c,Deuda_hasta_7_dias__c,Deuda_mas_de_60_dias__c,Deuda_sin_aplicar__c,Deuda_Total__c
+        	FROM    Account
+        	WHERE   Cod__c NOT IN :codigos
+    	];
+        for(Account c : cuentas){
+            c.Deuda_a_vencer__c = 0;
+            c.Deuda_sin_aplicar__c = 0;
+            c.Deuda_hasta_7_dias__c = 0;
+            c.Deuda_de_8_a_15_dias__c = 0;
+            c.Deuda_de_16_a_30_dias__c = 0;
+            c.Deuda_de_31_a_60_dias__c = 0;
+            c.Deuda_mas_de_60_dias__c = 0;
+            c.Deuda_Total__c = 0;
+            c.Deuda_Total_USD__c = 0;
+            c.Deuda_sin_ap__c = 0;
+            c.Deudas_a_vencer_USD__c = 0;
+            c.Deuda_hasta_7_d_as_USD__c= 0;
+            c.Deuda_de_8_a_15_dias_USD__c = 0;
+            c.Deuda_de_16__c = 0;
+            c.Deuda_de_31_a_60_dias_USD__c = 0;
+            c.Deuda_mas_de_60_dias_USD__c = 0;
+        }
+        update cuentas;
+        
+    }
+    
+    public static void gestionarDeuda(Account cuenta, List<Map<String,Object>> listComp){
+        
+        
+                cuenta.Deuda_Total__c = 0;
+                cuenta.Deuda_sin_aplicar__c = 0;
+                cuenta.Deuda_a_vencer__c = 0;
+                cuenta.Deuda_hasta_7_dias__c = 0;
+                cuenta.Deuda_de_8_a_15_dias__c = 0;
+                cuenta.Deuda_de_16_a_30_dias__c = 0;
+                cuenta.Deuda_de_31_a_60_dias__c = 0;
+                cuenta.Deuda_mas_de_60_dias__c = 0;
+            	
+        		cuenta.Deuda_Total_USD__c = 0;
+                cuenta.Deuda_sin_ap__c = 0;
+                cuenta.Deudas_a_vencer_USD__c = 0;
+                cuenta.Deuda_hasta_7_d_as_USD__c= 0;
+                cuenta.Deuda_de_8_a_15_dias_USD__c = 0;
+                cuenta.Deuda_de_16__c = 0;
+                cuenta.Deuda_de_31_a_60_dias_USD__c = 0;
+                cuenta.Deuda_mas_de_60_dias_USD__c = 0;
+        	
+        
+        for(Map<String,Object> deuda : listComp){
+            if (deuda.get('codvalmon') == '$'){
+                //pesos
+                Decimal importe = 0;
+                        if( deuda.get('importe') != null){
+                            importe  = (Decimal)deuda.get('importe');
+                        }
+                
+                string p = (string)deuda.get('periododemora').toString();
+                switch on p {
+                    when 'Sin Aplicar'{
+                        if (importe != 0){
+                            cuenta.Deuda_sin_aplicar__c = importe;
+                        }
+                    }
+                    when 'A Vencer'{
+                        if (importe != 0){
+                            cuenta.Deuda_a_vencer__c = importe;
+                        }
+                    }
+                    when '    Hasta 7 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_hasta_7_dias__c = importe;
+                        }
+                    }
+                    when '   De 8 a 15 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_de_8_a_15_dias__c = importe;
+                        }
+                    }
+                    when '  De 16 a 30 días'{
+                        
+                        if (importe != 0){
+                            cuenta.Deuda_de_16_a_30_dias__c = importe;
+                        }
+                    }
+                    when '  De 31 a 60 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_de_31_a_60_dias__c = importe;
+                        }
+                    }
+                    when ' Más de 60 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_mas_de_60_dias__c = importe;
+                        }
+                    }
+                }
+            }else{
+                //dolar
+                Decimal importe = 0;
+                        if( deuda.get('importe') != null){
+                            importe  = (Decimal)deuda.get('importe');
+                        }
+                
+                string p = (string)deuda.get('periododemora').toString();
+                switch on p {
+                    when 'Sin Aplicar'{
+                        if (importe != 0){
+                            cuenta.Deuda_sin_ap__c = importe;
+                        }
+                    }
+                    when 'A Vencer'{
+                        if (importe != 0){
+                            cuenta.Deudas_a_vencer_USD__c = importe;
+                        }
+                    }
+                    when '    Hasta 7 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_hasta_7_d_as_USD__c = importe;
+                        }
+                    }
+                    when '   De 8 a 15 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_de_8_a_15_dias_USD__c = importe;
+                        }
+                    }
+                    when '  De 16 a 30 días'{
+                        
+                        if (importe != 0){
+                            cuenta.Deuda_de_16__c = importe;
+                        }
+                    }
+                    when '  De 31 a 60 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_de_31_a_60_dias_USD__c = importe;
+                        }
+                    }
+                    when ' Más de 60 días'{
+                        if (importe != 0){
+                            cuenta.Deuda_mas_de_60_dias_USD__c = importe;
+                        }
+                    }
+                }
+            }
+        }
+        cuenta.Deuda_Total__c = cuenta.Deuda_sin_aplicar__c + cuenta.Deuda_a_vencer__c + cuenta.Deuda_hasta_7_dias__c + cuenta.Deuda_de_8_a_15_dias__c + cuenta.Deuda_de_16_a_30_dias__c + cuenta.Deuda_de_31_a_60_dias__c + cuenta.Deuda_mas_de_60_dias__c;
+        cuenta.Deuda_Total_USD__c = cuenta.Deuda_sin_ap__c + cuenta.Deudas_a_vencer_USD__c + cuenta.Deuda_hasta_7_d_as_USD__c + cuenta.Deuda_de_8_a_15_dias_USD__c + cuenta.Deuda_de_16__c + cuenta.Deuda_de_31_a_60_dias_USD__c + cuenta.Deuda_mas_de_60_dias_USD__c;
+    }
+}
