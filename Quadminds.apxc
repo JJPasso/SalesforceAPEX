@@ -1,0 +1,326 @@
+public class Quadminds {
+    
+    
+    public static HttpResponse getPois(String offset){
+        //Llamada a la api de Quadminds, hace un GET de todos los establecimientos con un limite de 200
+        // y un offset que le pasemos
+        QuadmindsConfig__c customSetting = QuadmindsConfig__c.getInstance();
+        String key = customSetting.Key__c;
+        String value = customSetting.Value__c;
+        String url = customSetting.endPoint__c;
+        Http http = new Http();
+    	HttpRequest request = new HttpRequest();
+    	request.setEndpoint(url+offset);
+    	request.setMethod('GET');
+    	request.setHeader('Accept', 'application/json');
+   		request.setHeader(key, value);
+    	HttpResponse response = http.send(request);
+        //retorno de un objeto respuesta para procesar
+        return response;
+    }
+    
+    @future (callout=true)
+    public static void procesarEstablecimientos(){
+        //Declaracion del log
+        Log__c log = new Log__c();
+        log.put('Name','Establecimientos Quadminds');
+        Datetime hoy = Datetime.now();
+        System.debug('Fecha de hoy: '+hoy);
+        log.put('Fecha_de_ejecucion__c',hoy);
+        
+        //Variables para el Log
+        Time inicio = hoy.time();
+        System.debug('Hora de inicio: '+inicio);
+        Integer horaInicio = inicio.hour();
+		Integer minutosInicio =inicio.minute();
+		Integer segundosInicio =inicio.second();
+        String detalleStr = '';
+        Boolean hayErrores = false;
+        //Declaracion de listas para enviar a los metodos correspondientes
+        List<Map<String, Object>> listPoisActualizar = New List<Map<String, Object>>();
+        List<Map<String, Object>> listPoisCreate = New List<Map<String, Object>>();
+        //Declaracion de variables para paginacion
+        String hayLoop = 'si';
+        QuadmindsConfig__c cs = QuadmindsConfig__c.getInstance();
+        Integer limite = Integer.valueOf(cs.Limite__c);
+        //Iteracion de llamadas para traer y filtrar todas las novedades
+        for (Integer index = 0; hayLoop == 'si' && index<20; index++){
+            	Integer limiteindex = index * limite;
+            	string offset = String.valueOf(limiteindex);
+                //Primero hago un get de todos los establecimientos
+    			HttpResponse response = Quadminds.getPois(offset);
+    			//Si la respuesta es correcta continuamos el proceso
+                if(response.getStatusCode() == 200) {
+                    System.debug('Respuesta correcta');
+                    
+            		//Deserializamos el json de la respuesta y casteamos el tipo para tener la info de la respuesta en un map
+        			Map<String, Object> results = (Map<String, Object>) JSON.deserializeUntyped(response.getBody());
+            		// Armamos una lista de pois con la data que vino de la API
+        			List<Object> pois = (List<Object>) results.get('data');
+                    if(pois.size()<limite){
+                        // si levantó menos de 200 registros quiere decir que es la última página
+						hayLoop = 'no';
+                    }
+            		//Seteamos la fecha de ayer para ir descartando registros que no sean novedades
+        			Datetime ayer = hoy.addDays(-1);
+                    System.debug(ayer);
+        			//String ayerStr = ayer.year() + '-0' + ayer.month() + '-0' + ayer.day();
+        			//Fecha usada para probar:
+        			//String ayerStr = '2022-03-18';
+        			System.debug('Fecha de update buscada: ' + ayer.date());
+                    //Lista de idsQuadminds que vamos a buscar en la base de SF para ver si hay que actualizar o crear
+        			List<Decimal> listPrincipal = New List<Decimal>();
+                    //Lista de pois con todos sus atributos
+            		List<Map<String, Object>> listPoisAProcesar = New List<Map<String, Object>>();
+            		//Por cada poi revisamos si es novedad y lo añadimos en las listas que vamos a procesar
+            		for(Object poi: pois) {
+                		//Casteamos el poi a un map para acceder mas facil a los datos
+            			Map<String, Object> poiCasteado = (Map<String, Object>) poi;
+            			//get de variables para filtro
+            			String updatedAtstr = poiCasteado.get('updatedAt').toString().substring(0,10);
+                        Integer year = Integer.valueOf(updatedAtstr.substring(0,4));
+						Integer month = Integer.valueOf(updatedAtstr.substring(5,7));
+						Integer day = Integer.valueOf(updatedAtstr.substring(8,10));
+						Date updatedAt = Date.newInstance(year, month, day);
+                        System.debug('Date poi: '+updatedAt);
+                        Integer nroEstablecimiento;
+                        if(poiCasteado.get('code').toString().substringAfter('-') != ''){
+                            nroEstablecimiento = Integer.valueOf(poiCasteado.get('code').toString().substringAfter('-'));
+                        }
+                        //Los procesamos si se actualizaron ayer en Quadminds y no son registros dummie(tienen numero = 100)
+            			if(updatedAt == ayer.date() && nroEstablecimiento != 100){
+                			System.debug('Las fechas son iguales y el registro no es dummie');
+                			System.debug((Decimal)poiCasteado.get('_id')); 
+                    		//Guardo los ids para conseguir la lista de los que ya estan en el crm
+            				listPrincipal.add((Decimal)poiCasteado.get('_id'));
+                    		//Guardo los pois que quiero crear o actualizar en otra lista aparte
+                    		listPoisAProcesar.add(poiCasteado);
+            			}
+        			}
+                    system.debug(listPrincipal);
+            		//Busqueda de ids que ya existen en SF
+        			List<Establecimiento__c> establecimientosExistentes = New List<Establecimiento__c>();
+      				establecimientosExistentes = [
+        				SELECT  Id_Quadminds__c
+        				FROM    Establecimiento__c
+        				WHERE   Id_Quadminds__c IN :listPrincipal
+    				];
+        			system.debug( 'establecimientosExistentes' );
+        			system.debug( establecimientosExistentes );
+            		//Armo un Map con los ids de quadminds. Esta estructura es util para consultas existenciales
+            		//La usamos para separar los pois que hay que actualizar de los que hay que crear
+            		Map<Decimal,Id> mapEstExistentes = New Map<Decimal,Id>();
+            		for(Establecimiento__c estExistente : establecimientosExistentes){
+                		Decimal idQuad = estExistente.Id_Quadminds__c;
+                		Id idSF = (Id)estExistente.id;
+                		mapEstExistentes.put(idQuad,idSf);
+            		}
+            		//Procesamiento de cada POI
+            		for(Map<String, Object> poi : listPoisAProcesar){
+                		Integer idQuad = Integer.valueOf(poi.get('_id'));
+                		//Si el id de Quadminds del poi esta en el map significa que ya esta en el crm y hay que actualizarlo
+                		if(mapEstExistentes.containsKey(idQuad)){
+                    		//Separo en una lista los pois que hay que actualizar
+                    		Id idSF = mapEstExistentes.get(idQuad);
+                    		poi.put('id',idSF);
+                    		listPoisActualizar.add(poi);
+                    		System.debug('Actualizar:' + poi.toString());
+                		}
+                		else{
+                    		//Si no esta en sf hay que crear el registro, lo guardo en una lista para hacerlo masivamente
+                    		listPoisCreate.add(poi); 
+                    		System.debug('Crear:' + poi.toString());
+                		}
+            		}  
+                }
+                else{
+                    //Status code distinto a 200
+                    detalleStr = detalleStr + 'Error en llamada numero '+String.valueOf(offset)+' a Quadminds, codigo: '+String.valueOf(response.getStatusCode())+'; ';
+                    hayErrores = true;
+                }
+        }
+        //Llamadas a metodos que se encargan de la actualizacion y creacion masiva
+        Integer cantActualizados = UpdateEstablecimientos(listPoisActualizar);
+		Integer cantCreados = CreateEstablecimientos(listPoisCreate);
+        log.put('Registros_actualizados__c',cantActualizados);
+        log.put('Registros_creados__c',cantCreados);
+        Time fin = Datetime.now().time();
+		System.debug('Hora de fin'+fin);		
+		Integer horaFin = fin.hour();
+		Integer minutosFin =fin.minute();
+		Integer segundosFin =fin.second();
+		Time duracion = Time.newInstance(horaFin - horaInicio, minutosFin - minutosInicio, segundosFin - segundosInicio,0);
+		System.debug('Duracion del proceso: '+duracion);
+        log.put('Duracion__c',duracion);
+        String resultado;
+        if(! hayErrores){
+            detalleStr = 'Sin errores';
+            resultado = 'CORRECTO';
+        }
+        else{
+            resultado = 'CON ERRORES';
+        }
+        log.put('Detalle__c',detalleStr);
+        log.put('Resultado__c',resultado);
+        insert(log);
+    } 
+	
+    public static Integer UpdateEstablecimientos(List<Map<String, Object>> Old){
+    	if (!Old.isEmpty()){
+    		// recopilo ids
+       		List<Establecimiento__c> news = New List<Establecimiento__c>();
+       		// armar lista new para update
+       		for(Map<String, Object> poi: Old) {
+        		//System.debug(poi);
+        		// para obtener todos sus datos y cargarlos masivamente
+           		try {
+            		System.debug(poi.get('id'));
+                	System.debug(poi.get('name'));
+                	System.debug(poi.get('state'));
+                	System.debug(poi.get('updatedAt'));
+                	System.debug(poi.get('latitude'));
+                	System.debug(poi.get('longitude'));
+                	System.debug(poi.get('_id'));
+					String codigo = (String)poi.get('code');
+        			Integer nroEstablecimiento;
+                	if(poi.get('code').toString().substringAfter('-') != ''){
+                    	nroEstablecimiento = Integer.valueOf(codigo.substringAfter('-'));
+                    }
+                    Decimal latitude;
+                    if( poi.get('latitude') != ''){
+                        latitude = (Decimal) poi.get('latitude');
+                    }
+                    Decimal longitude;
+                    if(poi.get('longitude') != ''){
+                        longitude = (Decimal) poi.get('longitude');
+                    }
+                    // Creacion del establecimiento en memoria
+             		Establecimiento__c NewEstablecimiento = new Establecimiento__c (
+                		id = (Id)poi.get('id'),
+						Name = poi.get('name').toString(),
+                    	Estado__c = poi.get('state').toString(),
+                    	QupdatedAt__c = poi.get('updatedAt').toString(),
+                    	Ubicacion__latitude__s = latitude,
+            			Ubicacion__longitude__s = longitude,
+                    	Numero_de_establecimiento__c = nroEstablecimiento
+                	);
+                	System.debug(NewEstablecimiento);
+                    //lo agrego a la lista de news
+                	news.add(NewEstablecimiento);
+         		}
+                //Hay registros que traian una latitud o longitud como '' y esto probocaba error en el casteo a Decimal
+                //Parece que ya no es necesario ya que se soluciono con los IFs de las lineas 137 y 141
+         		catch (System.NullPointerException e) {
+		 			System.debug('Null pointer exc: '+poi);
+        		}
+			}
+        	//Update masivo
+        	try {
+    			update news;
+            	system.debug( news );
+			} catch (DmlException e) {
+    			System.debug(e);
+			}
+            return news.size();
+		}
+        else{
+           System.debug('No hay registros para actualizar');
+           return 0;
+       }
+	}
+
+   public static Integer CreateEstablecimientos(List<Map<String, Object>> create){
+   		if (!create.isEmpty()){
+        	List<Establecimiento__c> establecimientosNoExistentes = New List<Establecimiento__c>();
+        	List<String> codigosCuenta = New List<String>();
+        	//recopilamos todos los codigos de cuenta
+      		for(Map<String, Object> poi: create) {
+            	String codigo = (String)poi.get('code');
+        		String codigoCuenta = codigo.substringBefore('-');
+            	codigosCuenta.add(codigoCuenta);
+            }
+        	System.debug(codigosCuenta);
+        	List<Account> cuenta = New List<Account>();
+        	cuenta = [
+        		SELECT  Cod__c
+        		FROM    Account
+        		WHERE   Cod__c IN :codigosCuenta
+    		];
+        	System.debug(cuenta);
+        	//List<Id> idscuenta = new List<Id>();
+        	//List<String> padrecuenta = new List<String>();
+        	Map<String,Id> mapCuentasExistentes = New Map<String,Id>();
+        	for(Account c:cuenta){
+            	//idscuenta.add((Id)c.get('id'));
+            	//padrecuenta.add((String)c.get('Codigo_Padre__c'));
+				String codigo = c.get('Cod__c').toString();
+                Id idSF =(Id) c.get('id');
+                mapCuentasExistentes.put(codigo,idSF);
+        	}
+        	//System.debug(idscuenta);
+        	//System.debug(padrecuenta);
+        	System.debug(mapCuentasExistentes);
+        	// buscamos todas las cuentas asociadas con los codigos masivamente
+        	for(Map<String, Object> poi: create) {
+        		// consultamos los registros que no existen en salesforce 
+        		// para obtener todos sus datos y cargarlos masivamente
+            	
+                    System.debug(poi.get('name'));
+                 
+                	System.debug(poi.get('state'));
+                	System.debug(poi.get('updatedAt'));
+                	
+                	System.debug(poi.get('_id'));
+                    System.debug(poi.get('code'));
+                	String codigo = (String)poi.get('code');
+        			String codigoCuenta = codigo.substringBefore('-');
+        			Integer nroEstablecimiento;
+                	if(poi.get('code').toString().substringAfter('-') != ''){
+                    	nroEstablecimiento = Integer.valueOf(codigo.substringAfter('-'));
+                    }
+                    System.debug(codigoCuenta);
+                    System.debug(nroEstablecimiento);
+                	Decimal latitude;
+                    if( poi.get('latitude') != ''){
+                        latitude = (Decimal) poi.get('latitude');
+                    }
+                    Decimal longitude;
+                    if( poi.get('longitude') != ''){
+                        longitude = (Decimal) poi.get('longitude');
+                    }
+                    System.debug('Latitud: '+latitude);
+                	System.debug('Longitude: '+longitude);
+                	if (mapCuentasExistentes.containsKey(codigoCuenta)){
+                		Establecimiento__c NewEstablecimiento = new Establecimiento__c (
+							Name = poi.get('name').toString(),
+            				Id_Quadminds__c = (Decimal)poi.get('_id'),
+            				Estado__c = poi.get('state').toString(),
+            				QupdatedAt__c = poi.get('updatedAt').toString(),
+            				Ubicacion__latitude__s = latitude,
+            				Ubicacion__longitude__s = longitude,
+            				Codigo_cuenta__c = codigoCuenta,
+            				Numero_de_establecimiento__c = nroEstablecimiento,
+                			Cuenta__c = mapCuentasExistentes.get(codigoCuenta)
+						);
+                		System.debug(NewEstablecimiento);
+                		establecimientosNoExistentes.add(NewEstablecimiento);
+            		}
+                
+       		}
+            //Insert masivo
+            try {
+    			insert establecimientosNoExistentes;
+            	system.debug( establecimientosNoExistentes );
+			} catch (DmlException e) {
+    			System.debug(e);
+			}
+            return establecimientosNoExistentes.size();
+      }
+       else{
+           System.debug('No hay registros para crear');
+           return 0;
+       }
+      
+	}
+   
+}
