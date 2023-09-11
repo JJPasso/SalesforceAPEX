@@ -1,0 +1,107 @@
+@isTest
+private class AbacoTest {
+    
+    @testSetup static void setup() {
+        // Create common test accounts
+        List<Account> testAccts = new List<Account>();
+        Account Triangulo = new Account (
+          Codigo_Padre__c = 'U184253',
+          Cod__c = 'U184253',
+          Name = 'EL TRIANGULO SA'
+        );
+        testAccts.add(Triangulo);
+        insert testAccts;
+        
+        AbacoConfig__c cs = new AbacoConfig__c(
+        	EndpointToken__c = 'https://gestion.petrotandil.com.ar/rest/rpc/login',
+        	Endpoint__c = 'https://gestion.petrotandil.com.ar/rest/clientes',
+        	Key__c = 'api@petrotandil.com.ar',
+        	Value__c = 'apiuser'
+           
+        );
+        insert cs;
+		List<User> usuarios = New List<User>();
+      	usuarios = [
+        	SELECT  Name
+        	FROM    User
+    	];        
+        PropietarioPredeterminado__c predet = new PropietarioPredeterminado__c(
+        	Id_usuario_SF__c = usuarios.get(0).id,
+            Nombre_usuario__c = 'Lucas'
+        );
+        insert predet;
+    }
+    
+    @isTest static void testgetPois(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceAbaco');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application/json');
+        Test.setMock(HttpCalloutMock.class, mock);
+        
+        Test.startTest();
+        HttpResponse response = Abaco.getClientes();
+        Test.stopTest();
+        System.assertEquals(200,response.getStatusCode(), 'The status code Ok.');
+        System.assertEquals('application/json', response.getHeader('Accept'));
+    }
+    
+    @isTest static void testgetPoisError(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceAbaco');
+        mock.setStatusCode(201);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        HttpResponse response = Abaco.getClientes();
+        Test.stopTest();
+        System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    @isTest static void testCuentas(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceAbaco');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        Abaco.procesarCuentas();
+        Test.stopTest();
+        List<Account> cuentasTest = New List<Account>();
+        cuentasTest = [
+        				SELECT  Tiene_cuenta_corriente__c,Name
+        				FROM    Account
+        				WHERE   Cod__c = 'U184253'
+    				];
+        Account prueba = (Account)cuentasTest.get(0);
+        
+        //System.debug(prueba);
+        System.assertEquals(false,cuentasTest.get(0).Tiene_cuenta_corriente__c,'no tiene cuenta corriente');
+        
+        //System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        //System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    @isTest static void testCuentasCantidad(){
+        StaticResourceCalloutMock mock = new StaticResourceCalloutMock();
+        mock.setStaticResource('staticResourceAbaco');
+        mock.setStatusCode(200);
+        mock.setHeader('Accept', 'application');
+        Test.setMock(HttpCalloutMock.class, mock);
+        Test.startTest();
+        Abaco.procesarCuentas();
+        Test.stopTest();
+        List<Account> cuentasTest = New List<Account>();
+        cuentasTest = [
+        				SELECT  Name
+        				FROM    Account
+    				];
+        
+        System.assertEquals(2,cuentasTest.size(),'cantidad de establecimientos correcta');
+        //System.assertNotEquals(200,response.getStatusCode(), 'The status code is not 200');
+        //System.assertNotEquals('application/json', response.getHeader('Accept'),'not is equals the name Accept');
+    }
+    
+    
+}
